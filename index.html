@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SMC Spot Trading Tool (Long Only)</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2c3e50;
+            text-align: center;
+        }
+        .chart-container {
+            position: relative;
+            height: 60vh;
+            margin-bottom: 20px;
+        }
+        .signals {
+            margin-top: 20px;
+            border-top: 1px solid #eee;
+            padding-top: 20px;
+        }
+        .signal {
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 5px;
+            background-color: #f8f9fa;
+            border-left: 4px solid #28a745;
+        }
+        .signal.valid {
+            background-color: #e8f5e9;
+            border-left: 4px solid #28a745;
+        }
+        .signal.invalid {
+            background-color: #ffebee;
+            border-left: 4px solid #f44336;
+        }
+        .controls {
+            margin-bottom: 20px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        select, button {
+            padding: 8px 12px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+        button {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>SMC Spot Trading Tool (Long Only)</h1>
+        
+        <div class="controls">
+            <select id="symbol">
+                <option value="BTCUSDT">BTC/USDT</option>
+                <option value="ETHUSDT">ETH/USDT</option>
+                <option value="BNBUSDT">BNB/USDT</option>
+                <option value="SOLUSDT">SOL/USDT</option>
+                <option value="XRPUSDT">XRP/USDT</option>
+            </select>
+            
+            <button id="loadData">Load Chart</button>
+            <button id="scanSignals">Scan for Long Signals</button>
+        </div>
+        
+        <div class="chart-container">
+            <canvas id="priceChart"></canvas>
+        </div>
+        
+        <div class="signals" id="signalsContainer">
+            <h3>Long Setup Signals (4H Demand Zone Retest)</h3>
+            <div id="signalsList"></div>
+        </div>
+    </div>
+
+    <script>
+        // Global variables
+        let priceChart;
+        let candles = [];
+        const timeframe = '4h';
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('loadData').addEventListener('click', loadChartData);
+            document.getElementById('scanSignals').addEventListener('click', scanForSignals);
+            loadChartData(); // Load initial data
+        });
+        
+        // Load chart data from Binance API
+        async function loadChartData() {
+            const symbol = document.getElementById('symbol').value;
+            try {
+                const response = await axios.get(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${timeframe}&limit=100`);
+                candles = response.data.map(candle => ({
+                    time: new Date(candle[0]),
+                    open: parseFloat(candle[1]),
+                    high: parseFloat(candle[2]),
+                    low: parseFloat(candle[3]),
+                    close: parseFloat(candle[4]),
+                    volume: parseFloat(candle[5])
+                }));
+                
+                renderChart();
+            } catch (error) {
+                console.error('Error fetching data:', error);
+                alert('Error loading data from Binance API');
+            }
+        }
+        
+        // Render the price chart
+        function renderChart() {
+            const ctx = document.getElementById('priceChart').getContext('2d');
+            
+            if (priceChart) {
+                priceChart.destroy();
+            }
+            
+            priceChart = new Chart(ctx, {
+                type: 'candlestick',
+                data: {
+                    labels: candles.map(candle => candle.time.toLocaleTimeString()),
+                    datasets: [{
+                        label: 'Price',
+                        data: candles.map(candle => ({
+                            x: candle.time,
+                            o: candle.open,
+                            h: candle.high,
+                            l: candle.low,
+                            c: candle.close
+                        })),
+                        color: {
+                            up: '#4CAF50',
+                            down: '#F44336',
+                            unchanged: '#9E9E9E',
+                        }
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                unit: 'day'
+                            }
+                        },
+                        y: {
+                            beginAtZero: false
+                        }
+                    },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return [
+                                        `Open: ${context.parsed.o}`,
+                                        `High: ${context.parsed.h}`,
+                                        `Low: ${context.parsed.l}`,
+                                        `Close: ${context.parsed.c}`
+                                    ];
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Scan for SMC long signals (demand zone retest)
+        function scanForSignals() {
+            const signalsList = document.getElementById('signalsList');
+            signalsList.innerHTML = '';
+            
+            // 1. Identify demand zones (order blocks)
+            const demandZones = findDemandZones();
+            
+            // 2. Check for retests
+            demandZones.forEach((zone, index) => {
+                // Check if price has retested this zone recently
+                const retestCandle = findRetest(zone);
+                
+                if (retestCandle) {
+                    // Calculate stop loss (below demand zone low)
+                    const stopLoss = zone.low * 0.995; // 0.5% below zone
+                    
+                    // Find nearest resistance for target
+                    const resistance = findResistance(retestCandle);
+                    const target = resistance ? resistance : retestCandle.close * 1.02; // 2% if no resistance found
+                    
+                    // Risk management
+                    const riskRewardRatio = ((target - retestCandle.close) / (retestCandle.close - stopLoss)).toFixed(2);
+                    
+                    // Only show signals with R:R >= 2
+                    if (riskRewardRatio >= 2) {
+                        const signalDiv = document.createElement('div');
+                        signalDiv.className = 'signal valid';
+                        signalDiv.innerHTML = `
+                            <strong>Long Signal #${index+1}</strong><br>
+                            <strong>Symbol:</strong> ${document.getElementById('symbol').value}<br>
+                            <strong>Demand Zone:</strong> ${zone.low.toFixed(4)} - ${zone.high.toFixed(4)}<br>
+                            <strong>Retest Candle:</strong> ${retestCandle.time.toLocaleString()}<br>
+                            <strong>Entry:</strong> ${retestCandle.close.toFixed(4)}<br>
+                            <strong>Stop Loss:</strong> ${stopLoss.toFixed(4)} (below demand zone)<br>
+                            <strong>Target:</strong> ${target.toFixed(4)}<br>
+                            <strong>Risk/Reward:</strong> 1:${riskRewardRatio}<br>
+                            <strong>Confirmation:</strong> Wait for candle to close above demand zone
+                        `;
+                        signalsList.appendChild(signalDiv);
+                        
+                        // Highlight on chart
+                        highlightZoneOnChart(zone, retestCandle, stopLoss, target);
+                    }
+                }
+            });
+            
+            if (signalsList.children.length === 0) {
+                const noSignalDiv = document.createElement('div');
+                noSignalDiv.className = 'signal invalid';
+                noSignalDiv.textContent = 'No valid long signals found based on SMC demand zone retest strategy.';
+                signalsList.appendChild(noSignalDiv);
+            }
+        }
+        
+        // Find demand zones (order blocks)
+        function findDemandZones() {
+            const zones = [];
+            
+            // Look for strong bullish candles (demand zones)
+            for (let i = 1; i < candles.length - 1; i++) {
+                const candle = candles[i];
+                const prevCandle = candles[i-1];
+                const nextCandle = candles[i+1];
+                
+                // Criteria for demand zone:
+                // 1. Strong bullish candle (body > 2x average body size)
+                const avgBodySize = calculateAverageBodySize();
+                const bodySize = candle.close - candle.open;
+                
+                if (bodySize > 2 * avgBodySize && bodySize > 0) {
+                    // 2. Followed by consolidation or pullback
+                    if (nextCandle.low > candle.low) {
+                        zones.push({
+                            high: candle.high,
+                            low: candle.low,
+                            time: candle.time,
+                            candleIndex: i
+                        });
+                    }
+                }
+            }
+            
+            return zones;
+        }
+        
+        // Calculate average candle body size
+        function calculateAverageBodySize() {
+            let sum = 0;
+            candles.forEach(candle => {
+                sum += Math.abs(candle.close - candle.open);
+            });
+            return sum / candles.length;
+        }
+        
+        // Find retest of a demand zone
+        function findRetest(zone) {
+            // Look for candles that retested the zone (within 1% of zone low)
+            const zoneRange = zone.high - zone.low;
+            const tolerance = zone.low * 0.01; // 1% tolerance
+            
+            for (let i = zone.candleIndex + 1; i < candles.length; i++) {
+                const candle = candles[i];
+                
+                // Check if candle touched the zone
+                if (candle.low <= zone.low + tolerance && candle.low >= zone.low - tolerance) {
+                    // Check if it closed above the zone (valid retest)
+                    if (candle.close > zone.low) {
+                        return candle;
+                    }
+                }
+            }
+            
+            return null;
+        }
+        
+        // Find nearest resistance above current price
+        function findResistance(currentCandle) {
+            const currentPrice = currentCandle.close;
+            let resistance = null;
+            
+            // Look for previous highs above current price
+            for (let i = 0; i < candles.length; i++) {
+                const candle = candles[i];
+                if (candle.high > currentPrice && (!resistance || candle.high < resistance)) {
+                    resistance = candle.high;
+                }
+            }
+            
+            return resistance;
+        }
+        
+        // Highlight zone and signals on chart
+        function highlightZoneOnChart(zone, retestCandle, stopLoss, target) {
+            // Add annotations to chart
+            priceChart.options.plugins.annotation = {
+                annotations: {
+                    zoneBox: {
+                        type: 'box',
+                        xMin: zone.time,
+                        xMax: retestCandle.time,
+                        yMin: zone.low,
+                        yMax: zone.high,
+                        backgroundColor: 'rgba(46, 204, 113, 0.2)',
+                        borderColor: 'rgba(46, 204, 113, 0.8)',
+                        borderWidth: 1
+                    },
+                    entryPoint: {
+                        type: 'point',
+                        xValue: retestCandle.time,
+                        yValue: retestCandle.close,
+                        radius: 5,
+                        backgroundColor: 'rgba(52, 152, 219, 1)',
+                        borderColor: 'rgba(52, 152, 219, 1)'
+                    },
+                    stopLossLine: {
+                        type: 'line',
+                        yMin: stopLoss,
+                        yMax: stopLoss,
+                        borderColor: 'rgba(231, 76, 60, 0.8)',
+                        borderWidth: 2,
+                        borderDash: [6, 6],
+                        label: {
+                            content: 'Stop Loss',
+                            enabled: true,
+                            position: 'right'
+                        }
+                    },
+                    targetLine: {
+                        type: 'line',
+                        yMin: target,
+                        yMax: target,
+                        borderColor: 'rgba(46, 204, 113, 0.8)',
+                        borderWidth: 2,
+                        borderDash: [6, 6],
+                        label: {
+                            content: 'Target',
+                            enabled: true,
+                            position: 'right'
+                        }
+                    }
+                }
+            };
+            
+            priceChart.update();
+        }
+    </script>
+</body>
+</html>
